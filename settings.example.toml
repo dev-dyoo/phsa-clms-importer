@@ -1,0 +1,10 @@
+# phsa-clms-importer — Shared settings
+# Copy to settings.toml and fill in the PROD Oracle CLMS credentials.
+
+[server]
+baseUrl = "iaequp.fa.ocs.oraclecloud.com"
+username = "CONVERSION"
+password = "REPLACE_ME"
+
+[retry]
+max_retries = 3

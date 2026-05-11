@@ -1,0 +1,11 @@
+node_modules/
+
+# Credentials
+settings.toml
+
+# Per-script runtime artifacts
+**/log/
+**/output/
+
+# Backups
+*.bak

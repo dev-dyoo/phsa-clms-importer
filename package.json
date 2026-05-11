@@ -1,0 +1,24 @@
+{
+  "name": "phsa-clms-importer",
+  "version": "1.0.0",
+  "type": "module",
+  "private": true,
+  "description": "Standalone Oracle Cloud CLMS data-import pipeline (extracted from phsa-clms/phsa_scripts)",
+  "scripts": {
+    "1-delete-contracts": "node 1-DeleteContracts/run.js",
+    "2-transform-headings": "node 2-TransformHeadings/run.js",
+    "3-transform-values": "node 3-TransformValues/run.js",
+    "4-validate-values": "node 4-ValidateValues/run.js",
+    "5-fill-contract-type-id": "node 5-FillContractTypeId/run.js",
+    "6-fill-primary-party-id": "node 6-FillPrimaryPartyId/run.js",
+    "7-insert-contract": "node 7-InsertContract/run.js",
+    "8-insert-contract-properties": "node 8-InsertContractProperties/run.js",
+    "9-insert-contacts": "node 9-InsertContacts/run.js",
+    "9-retry-and-report": "node 9-InsertContacts/retry-and-report.js",
+    "delete-contract-properties": "node DeleteContractProperties/run.js"
+  },
+  "dependencies": {
+    "@iarna/toml": "^2.2.5",
+    "csv-parse": "^5.6.0"
+  }
+}
