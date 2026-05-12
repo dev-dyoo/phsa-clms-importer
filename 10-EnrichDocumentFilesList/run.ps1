@@ -76,7 +76,8 @@ $ErrorActionPreference = 'Stop'
 
 $ScriptDir  = Split-Path -Parent $MyInvocation.MyCommand.Path
 $RepoRoot   = Split-Path -Parent (Split-Path -Parent $ScriptDir)
-$CommonDir  = Join-Path (Split-Path -Parent $ScriptDir) '_common'
+# shared library lives in 11-ImportContractDocuments/_common
+$CommonDir  = Join-Path (Join-Path (Split-Path -Parent $ScriptDir) '11-ImportContractDocuments') '_common'
 $ModulePath = Join-Path $CommonDir 'OracleFusionCommon.psm1'
 
 if (-not (Test-Path $ModulePath)) {
