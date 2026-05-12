@@ -1,426 +1,190 @@
-# Oracle Cloud API — Contract & Supplier Endpoints
+# API Endpoints
 
-Base host: `iaequp.fa.ocs.oraclecloud.com` (PROD)
+Every Oracle endpoint touched by the scripts in this repo, inventoried from the code.
+Regenerate this file whenever the scripts change.
 
-All paths are relative to the base host. Version segment: `11.13.18.05`.
+## Connection
 
----
-
-## Contract Identifier Relationships
-
-There are four distinct identifiers on a contract. They are **not interchangeable**.
-
-### `contracts.ContractId`
-
-The **external Oracle contract ID**. This is what everything uses as the "contract handle":
-
-- URL path segment for all child fetches: `/contracts/{ContractId}/child/...`
-- URL path segment for PATCH and DELETE: `/contracts/{ContractId}`
-- URL path segment for action calls: `/contracts/{ContractId}/action/submitForApproval`, `.../action/sign`
-- Stored in output CSVs as `OracleContractId`
-- Returned in POST response as `data.ContractId` (NOT `data.Id`)
-
-### `contracts.Id`
-
-The **internal Oracle DB primary key** (numeric). Used only for linking to `ContractProperties_c`:
-
-- `ContractProperties_c.ObjectId_c = contracts.Id` — this is the FK from props to contract
-- Composite orphan-detection key: `Id|MajorVersion` matched against `ObjectId_c|MajorVersion_c`
-- NOT used in URL paths for child fetches, PATCH, DELETE, or actions
-
-### `contracts.ContractNumber`
-
-The **human-readable business identifier** (e.g. `"SOW20231107KN-2"`). Used for:
-
-- Business-level lookup and matching across scripts
-- Denormalized into `ContractProperties_c.ContractNumber_c`
-- Filter: `?q=ContractNumber=<value>`
-
-### `contracts.MajorVersion`
-
-Version number. Used for:
-
-- `ContractProperties_c.MajorVersion_c` — stored alongside `ObjectId_c` to form the composite FK
-- Orphan detection: a props record is orphaned if no contract matches `Id|MajorVersion` (even if a contract with that `Id` exists at a different version)
+- **Host:** `iaequp.fa.ocs.oraclecloud.com` (PROD), from `settings.toml` `[server] baseUrl` (Node scripts) / `.settings` `BaseUrl` (PowerShell scripts).
+- **REST base path:** `/fscmRestApi/resources/11.13.18.05`
+- **Auth:** HTTP Basic — `Authorization: Basic base64(username:password)`. User `CONVERSION`.
+- **Default headers (Node `lib/client.js`):** `Content-Type: application/json`, `Accept: application/json` (overridden where noted).
+- **Retry:** exponential backoff on network errors and retryable HTTP codes; **400/401/403/404 are never retried** (auth/permission errors abort immediately). Honours `Retry-After` on 429.
+- **Common query params:** `onlyData=true` (strip links/metadata), `totalResults=true` (include `totalResults` count), `limit=N` + `offset=N` (pagination — scripts page in 500s, except the document-existence check in step 11 which uses 200), `q=<expr>` (filter), `fields=<csv>` (projection), `expand=all|<child>`.
 
 ---
 
-### `ContractProperties_c` identifiers
+## REST — `/contracts`
 
-| Field | Maps to | Purpose |
-|---|---|---|
-| `ContractProperties_c.Id` | self (props PK) | PATCH/DELETE URL: `/ContractProperties_c/{Id}` |
-| `ContractProperties_c.ObjectId_c` | `contracts.Id` | FK linking props record to contract |
-| `ContractProperties_c.MajorVersion_c` | `contracts.MajorVersion` | Part of composite FK with `ObjectId_c` |
-| `ContractProperties_c.ContractNumber_c` | `contracts.ContractNumber` | Denormalized copy; used to look up `ContractProperties_c.Id` by contract number |
+### `GET /contracts?q=ContractNumber=<n>&fields=ContractId&onlyData=true[&totalResults=true]`
+Resolve a `ContractNumber` to its Fusion `ContractId`. 0 results = not found; >1 = ambiguous (the scripts flag this).
+**Used by:** `1-DeleteContracts` (before delete), `12-SubmitContractsForApproval` (fallback when a row has no `OracleContractId`), `10-EnrichDocumentFilesList` (PowerShell, "pass 1 — resolve contracts").
 
-### Lookup patterns used by scripts
+### `GET /contracts?limit=1&onlyData=true`
+Startup sanity check (any 2xx = API reachable / creds OK).
+**Used by:** `1-DeleteContracts`, `11-ImportContractDocuments` (PowerShell), `12-SubmitContractsForApproval/run.ps1` (reference PowerShell).
 
-| Goal | How |
+### `GET /contracts?fields=ContractId,ContractNumber&onlyData=true&totalResults=true&limit=500&offset=N`  *(paginated)*
+Pull every contract to build a `ContractNumber → ContractId` map.
+**Used by:** `9-InsertContacts`, `9-InsertContacts/retry-and-report.js` (these add `Id`), `8-InsertContractProperties` (variant: `fields=Id,ContractId,ContractNumber,MajorVersion` — also needs the internal `Id`/version).
+
+### `GET /contracts/{ContractId}?expand=all`  *(or `expand=ContractHeaderFlexfieldVA`)*
+Full contract resource, including child collections `ContractParty`, `ContractHeaderFlexfieldVA` (PHSA header DFF: `contractExecutionApproved`, `phsaCMTeam`, `phsaDistributor1`, `phsaCategory1/2/3`, …), `ContractDocuments`, `SupportingDocuments`, `ContractStatusHistory`, `ContractApprovalHistory`, etc. Key scalar fields: `StsCode` (`DRAFT` / `PENDING_APPROVAL` / `APPROVED` / `PENDING_SIGNATURE` / `SIGNED` / `ACTIVE` / `EXPIRED` / …), `StateTransitionFlowState`, `Status`, `SubmitRenderedFlag`, `SignContractRenderedFlag`, `ValidateContractRenderedFlag`, `DateApproved`, `DateSigned`.
+**Used by:** ad-hoc diagnostics (status checks, reading the header flexfield). Not a pipeline step on its own.
+
+### `POST /contracts`  *(body = contract payload)*
+Create a contract (in `DRAFT`). Response carries `ContractId`.
+Payload: a fixed base —
+```json
+{ "EnableElectronicSignFlag": false, "TemplateFlag": false, "BuyOrSell": "B",
+  "AuthoringPartyCode": "INTERNAL", "PHSACustomValidationCompleted_c": true,
+  "AccessLevel": "UPDATE", "OrgId": 300000004527105, "LegalEntityId": 300000004643005 }
+```
+— plus the row's mapped attributes (`ContractNumber`, `ContractTypeId`, `PrimaryPartyId`, `Cognomen`/title, `StartDate`/`EndDate`, currency, distributor `SupplierId`, etc.), `Description` (concatenation of `ContractDescription` / `ContractCommentTitle` / `LatestComment`, ASCII-transliterated), and `ContractHeaderFlexfieldVA: [ { … phsaCMTeam, contractExecutionApproved:"PHSA", phsaCategory1/2/3 … } ]`. Dates are sent as `YYYY-MM-DD`.
+**Used by:** `7-InsertContract`.
+
+### `DELETE /contracts/{ContractId}`
+**Used by:** `1-DeleteContracts`.
+
+### `GET /contracts/{ContractId}/child/ContractParty?expand=all`
+The contract's parties; each item has `PartyRoleCode` (`CUSTOMER` / `SUPPLIER`), a `self` link `href`, and a nested `ContractPartyContact[]` (each with `ContactRoleCode` — `CONTRACT_ADMIN` / `BUYER` / `VENDOR_CONTACT` — `PartyContactName`, and a `self` link).
+**Used by:** `9-InsertContacts`, `9-InsertContacts/retry-and-report.js` — to find the CUSTOMER/SUPPLIER party hrefs, see which contact roles already exist, and locate the leftover `CONVERSION` contact.
+
+### `POST {ContractPartyHref}/child/ContractPartyContact`  *(body = contact payload)*
+Add a contact (admin/buyer to the CUSTOMER party, vendor contact to the SUPPLIER party). The path is derived from the `ContractParty` self-link href (host stripped) + `/child/ContractPartyContact`. Body carries `ContactRoleCode` and the resolved `ContactId` (internal contacts come from the SOAP crosswalk; vendor contacts from `contractVContacts` / created on the supplier).
+**Used by:** `9-InsertContacts`, `9-InsertContacts/retry-and-report.js`.
+
+### `DELETE {ContractPartyContactHref}`
+Remove the migration `CONVERSION` contact from the CUSTOMER party.
+**Used by:** `9-InsertContacts`.
+
+### `GET /contracts/{ContractId}/child/ContractDocuments?fields=…&limit=200&offset=N`  *(paginated)*
+Existing contract documents. **Note:** `?fields=UploadedFileName` returns `null` on this child resource — the full item must be fetched; `UploadedFileName` / `FileName` are populated there. `CategoryName` values seen: `OKC_DOCUMENTS_CONTRACT`, `OKC_DOCUMENTS_PCD`.
+**Used by:** `11-ImportContractDocuments` (PowerShell — existence check, skip already-uploaded files).
+
+### `GET /contracts/{ContractId}/child/SupportingDocuments?…&limit=200&offset=N`  *(paginated)*
+Peer collection to `ContractDocuments` (not nested under it — fetch separately). `CategoryName` values: `OKC_DOCUMENTS_SUPPORTING_DOC`, `PHSA_ITEM_SPREADSHEETS`.
+**Used by:** `11-ImportContractDocuments` (PowerShell).
+
+### `POST /contracts/{ContractId}/child/ContractDocuments`  *(body = document payload)*
+### `POST /contracts/{ContractId}/child/SupportingDocuments`  *(same shape)*
+Upload a file to a contract. Body:
+```json
+{ "DatatypeCode": "FILE", "Title": "<file name, ≤80 chars, extension kept>",
+  "UploadedFileContentType": "<MIME type>", "UploadedFileName": "<full file name>",
+  "FileContents": "<base64 of the file bytes>", "Description": "...",
+  "FileName": "<full file name>", "CategoryName": "<see below>" }
+```
+Resource & `CategoryName` are chosen from the load-list `DocType`: `ContractDoc` → `ContractDocuments` + `OKC_DOCUMENTS_CONTRACT`; `SupportingDoc` → `SupportingDocuments` + `OKC_DOCUMENTS_SUPPORTING_DOC`; `Excel` → `SupportingDocuments` + `PHSA_ITEM_SPREADSHEETS`.
+**Used by:** `11-ImportContractDocuments` (PowerShell).
+
+### `POST /contracts/{ContractId}/action/submitForApproval`
+Submit a draft contract into the BPM approval workflow. **`Content-Type: application/vnd.oracle.adf.action+json`** (the ADF custom-action media type — **not** `application/json`); **no request body**. Returns 200 on accept; the contract may still fail validation and stay in `DRAFT` (see `validateContract`). Failures seen: `OKC-196129` (contract not in a state from which SUBMIT is valid — e.g. `PENDING_ACCEPTANCE`, `EXPIRED`).
+**Used by:** `12-SubmitContractsForApproval`.
+
+### `POST /contracts/{ContractId}/action/sign`
+Sign an approved contract (final transition → `ACTIVE`). **`Content-Type: application/vnd.oracle.adf.action+json`**; **no body**. Failures seen: `OKC-196583` (contract not in `PENDING_SIGNATURE` status), `OKC-196434` (operation not allowed on this contract type).
+**Used by:** `13-ActivateContracts`.
+
+### `POST /contracts/{ContractId}/action/validateContract`
+Run contract validation without changing state. **`Content-Type: application/vnd.oracle.adf.action+json`**; **no body**. Returns `{ "result": { "Errors": [ { "MessageName": "...", "MessageText": "...", "ObjectName": "...", ... } ], "Warnings": [...] } }`. Useful for diagnosing why `submitForApproval` succeeds (200) but the contract won't leave `DRAFT` (e.g. `OKC_VAL_INACTIVE_SUPPLIER_CONT` — "The supplier contact … is inactive").
+**Used by:** diagnostics (not a pipeline step).
+
+### `GET /contracts/300000006409761/lov/ContractTypeAllVA?fields=ContractTypeId,Name&onlyData=true&limit=500`
+The contract-type list of values (`ContractTypeId` ↔ `Name`). `300000006409761` is a fixed reference contract id used only to reach the LOV resource.
+**Used by:** `5-FillContractTypeId`.
+
+---
+
+## REST — `/suppliers`
+
+### `GET /suppliers?fields=SupplierId,SupplierPartyId,Supplier,DFF&expand=all&onlyData=true&totalResults=true&limit=500&offset=N`  *(paginated)*
+Every supplier, with the descriptive flexfield (`DFF`) — the `VendorMasterId` lives there. Used to build a `VendorMasterId → SupplierPartyId` table.
+**Used by:** `6-FillPrimaryPartyId`.
+
+### `GET /suppliers?fields=SupplierId,SupplierPartyId&onlyData=true&totalResults=true&limit=500&offset=N`  *(paginated)*
+`SupplierPartyId → SupplierId` map (composed with step 6's reference CSV → `VendorMasterId → SupplierId` for the distributor on the contract).
+**Used by:** `7-InsertContract`.
+
+### `GET /suppliers?q=SupplierPartyId=<id>&fields=SupplierId,SupplierPartyId&onlyData=true`
+Resolve one supplier's `SupplierId` from its party id.
+**Used by:** `9-InsertContacts`, `9-InsertContacts/retry-and-report.js`.
+
+### `POST /suppliers/{SupplierId}/child/contacts`  *(body = supplier-contact payload)*
+Create a supplier contact when the needed vendor contact doesn't already exist. Body:
+```json
+{ "FirstName": "...", "LastName": "...", "AdministrativeContactFlag": true,
+  "PhoneNumber": "...", "Email": "..." }
+```
+**Used by:** `9-InsertContacts`, `9-InsertContacts/retry-and-report.js`.
+
+---
+
+## REST — `/contractVContacts`
+
+### `GET /contractVContacts?onlyData=true&fields=ContactId,PartyId,ContactName,EmailAddress&q=PartyId=<primaryPartyId>`
+Existing vendor contacts for a supplier party — used to find an existing `ContactId` before creating a new supplier contact.
+**Used by:** `9-InsertContacts`, `9-InsertContacts/retry-and-report.js`.
+
+---
+
+## REST — `/ContractProperties_c`  *(PHSA custom EFF object; auto-created by Oracle when a contract is created)*
+
+### `GET /ContractProperties_c?fields=Id,ObjectId_c&onlyData=true&totalResults=true&limit=500&offset=N`  *(paginated)*
+All properties records → `ObjectId_c` (= the contract's internal `Id`) → record `Id`. Used to decide POST-new vs PATCH-existing.
+**Used by:** `8-InsertContractProperties`.
+
+### `GET /ContractProperties_c?q=ContractNumber_c=<n>&fields=Id,ContractNumber_c,ObjectId_c,RecordName,MajorVersion_c,CreationDate&onlyData=true&limit=500&offset=N`
+Properties records for a given contract number — used to find what to delete.
+**Used by:** `DeleteContractProperties`.
+
+### `POST /ContractProperties_c`  *(body = properties payload)*
+### `PATCH /ContractProperties_c/{Id}`  *(same body — used when a record already exists)*
+Body: `RecordName` (= ContractNumber), `ObjectId_c` (= contract internal Id), `MajorVersion_c`, `SourcingTrackerID_c`, `ParticipatingHA_c`, `Text02_c`, `Number06_c`–`Number14_c` (the per-health-org estimated annual spends + total), `PDText01_c` (JSON array of `ContractTypeName`), `PDText02_c` (`InitialProcurementStrategy`), `PDText03_c` (`ExpiryStrategy`), `Text11_c`/`Text12_c`/`Text13_c` (rebate fields), `Text18_c` (`AgencyOrDepartment`), `Date01_c` (`DateOfNextPriceIncrease`, ISO date). Null/blank fields are omitted.
+**Used by:** `8-InsertContractProperties`.
+
+### `DELETE /ContractProperties_c/{Id}`
+**Used by:** `DeleteContractProperties`.
+
+---
+
+## REST — `/valueSets` and `/standardLookups`  *(reference-code lookups)*
+
+### `GET /valueSets/{resourceCode}/child/values?fields=Value&onlyData=true[&limit=N&offset=N]`
+Valid values for a value set. Used for `CMTeam` → `PHSA_CM_TEAMS`.
+**Used by:** `4-ValidateValues`; `3-TransformValues` (the live-fetch path is present but commented out — it ships with a built-in list of valid codes).
+
+### `GET /standardLookups/{resourceCode}/child/lookupCodes?fields=LookupCode&q=<filter>&onlyData=true`
+Valid lookup codes for a standard lookup. Used for `ExpiryStrategy` → `PHSA_EXPIRY_STRATEGY`, `InitialProcurementStrategy` → `PHSA_INITIAL_PRC_STRATEGY`, `OptionYearsAvailable` → `PHSA_OPTION_YEARS_AVAILABLE`, `ContractTypeName` → `PHSA_WB_CONTRACT_TYPE`.
+**Used by:** `4-ValidateValues`; `3-TransformValues` (commented-out fetch path).
+
+---
+
+## SOAP / BI Publisher — `/xmlpserver/services/ExternalReportWSSService`
+
+### `POST /xmlpserver/services/ExternalReportWSSService`
+**`Content-Type: application/soap+xml; charset=utf-8`** (SOAP 1.2). Body = a `runReport` envelope (`http://xmlns.oracle.com/oxp/service/PublicReportService`) with `reportAbsolutePath` = `/Custom/PHSA/Suppliers/Interfaces/PARTY_CONTACT_ID_CROSSWALK.xdo`. Response: extract the `<ns2:reportBytes>` element, base64-decode → a CSV that maps **email → Oracle ContactId** (the crosswalk for resolving internal contacts).
+**Used by:** `9-InsertContacts`, `9-InsertContacts/retry-and-report.js`.
+
+---
+
+## Quick reference — script → endpoints
+
+| Script | Endpoints used |
 |---|---|
-| PATCH/DELETE a contract | Use `contracts.ContractId` in URL path |
-| Fetch child collections | Use `contracts.ContractId` in URL path |
-| PATCH/DELETE a ContractProperties_c record | Fetch `ContractProperties_c.Id` by querying `?q=ObjectId_c=<contracts.Id>` or by `ContractNumber_c` |
-| Detect orphaned ContractProperties_c | Compare `ObjectId_c\|MajorVersion_c` against known `contracts.Id\|MajorVersion` pairs |
-| Resolve `SupplierPartyId` from driver CSV | Match `VendorMasterId` → `suppliers.DFF[0].vendorMasterId` → `suppliers.SupplierPartyId` |
-| Link contract to supplier | `contracts.PrimaryPartyId = suppliers.SupplierPartyId` (also set as `contracts.PartyId` and `ContractParty[0].PartyId` on create) |
-
----
-
----
-
-## `/fscmRestApi/resources/11.13.18.05/contracts`
-
-### GET — list/search contracts
-
-| Parameter | Values / Notes |
-|---|---|
-| `fields` | `ContractId, ContractNumber, ContractTypeId, PrimaryPartyId, Cognomen, Description, StartDate, EndDate, EstimatedAmount, CurrencyCode, MajorVersion, Id` |
-| `q` | `ContractNumber=<value>` |
-| `onlyData` | `true` |
-| `totalResults` | `true` |
-| `limit` | max `500` |
-| `offset` | pagination |
-
-Used by: ValidateContracts, FetchContractContacts, LoadMissingContacts, DeleteOrphanedContractProperties, enrich-master-from-api, ReassignBuyer, DeleteContracts
-
----
-
-### POST — create contract
-
-| Field | Type | Source / Notes |
-|---|---|---|
-| `EnableElectronicSignFlag` | bool | always `false` |
-| `TemplateFlag` | bool | always `false` |
-| `BuyOrSell` | string | always `"B"` |
-| `AuthoringPartyCode` | string | always `"INTERNAL"` |
-| `PHSACustomValidationCompleted_c` | bool | always `true` |
-| `AccessLevel` | string | always `"UPDATE"` |
-| `OrgId` | number | `300000004527105` |
-| `LegalEntityId` | number | `300000004643005` |
-| `ContractTypeId` | number | mapped from `Source` column (see ContractTypeId mapping below) |
-| `StartDate` | string | `YYYY-MM-DD` — from `ContractStartDate` (M/D/YYYY) |
-| `EndDate` | string | `YYYY-MM-DD` — from `ContractEndDate` (M/D/YYYY) |
-| `EstimatedAmount` | number | from `TotalValue`; `0` if blank |
-| `ContractNumber` | string | from `ContractNumber` |
-| `PrimaryPartyId` | number | `SupplierPartyId` (resolved from `VendorMasterId` via suppliers API) |
-| `PartyId` | number | same as `PrimaryPartyId` |
-| `CurrencyCode` | string | from `Currency`; defaults to `"CAD"` |
-| `Cognomen` | string | from `Title`; falls back to `ContractNumber` |
-| `Description` | string | concat of `ContractDescription + ContractCommentTitle + LatestComment` (newline-joined); omitted if blank |
-| `ContractHeaderFlexfieldVA` | array[1] | see DFF fields below; omitted if empty |
-| `ContractParty` | array[1] | `[{ PartyRoleCode: "SUPPLIER", PartyId: <SupplierPartyId> }]` |
-
-**ContractTypeId mapping by Source:**
-
-| Source | ContractTypeId |
-|---|---|
-| `ConsultingContractRegistry` | `300000005684060` |
-| `ContractRegistry` | `300000005684063` |
-| `FleetwaveBcehs` | `300000005684063` |
-
-**Response**: use `ContractId` field (NOT `Id`) to reference created contract.
-
-Used by: LoadBatch
-
----
-
-### PATCH — update contract fields
-
-| Field | Type | Notes |
-|---|---|---|
-| `Cognomen` | string | from `Title` |
-| `StartDate` | string | `YYYY-MM-DD` |
-| `EndDate` | string | `YYYY-MM-DD` |
-| `EstimatedAmount` | number | from `TotalValue` |
-| `Description` | string | concat of description fields |
-| `StsCode` | string | `"CANCELED"` — required before DELETE |
-
-Used by: PatchContracts/patch-contracts, DeleteContracts/delete-live
-
----
-
-### DELETE — delete contract
-
-Must PATCH `StsCode = "CANCELED"` first.
-
-Used by: DeleteContracts/delete-live
-
----
-
-## `/fscmRestApi/resources/11.13.18.05/contracts/{ContractId}/child/ContractParty`
-
-### GET
-
-| Parameter | Values |
-|---|---|
-| `fields` | `PartyName, PartyId, PartyRoleCode` (basic) or `PartyName, PartyId, PartyRoleCode, ContractPartyContact` (with contacts) |
-| `expand` | `all` — required to populate `ContractPartyContact` |
-| `onlyData` | `true` — **omit** when you need `self` href for child POSTs |
-| `limit` | `500` |
-
-**Key fields on each item:**
-- `PartyRoleCode` — `"CUSTOMER"` or `"SUPPLIER"`
-- `PartyId`
-- `PartyName`
-- `links[rel=self].href` — encoded href required for POSTing/DELETing `ContractPartyContact`
-- `ContractPartyContact` — array (only populated with `expand=all`)
-
-Used by: LoadBatch, LoadMissingContacts, LoadMissingVendorContacts, FetchContractContacts, PatchContracts/patch-contacts, DeleteContracts, DeleteConversionContacts, ReassignBuyer, UpdateContractContacts
-
----
-
-## `/fscmRestApi/resources/11.13.18.05/contracts/{ContractId}/child/ContractParty/{encodedKey}/child/ContractPartyContact`
-
-### GET
-
-| Parameter | Values |
-|---|---|
-| `fields` | `ContactId, PartyContactName, ContactRoleCode` |
-| `limit` | `500` |
-
-**Key fields on each item:**
-- `ContactId`
-- `PartyContactName` — `"CONVERSION"` used to identify contacts to delete
-- `ContactRoleCode`
-- `links[rel=self].href` — required for DELETE
-
-### POST — add contact to party
-
-| Field | Type | Notes |
-|---|---|---|
-| `ContactRoleCode` | string | `"CONTRACT_ADMIN"`, `"BUYER"`, or `"VENDOR_CONTACT"` |
-| `ContactId` | number | from SOAP crosswalk (`SUPPLIER_PARTY_ID` col) for customer contacts; from `contractVContacts` for vendor |
-| `OwnerFlag` | bool | `true` for `CONTRACT_ADMIN` always; `true` for `BUYER` only if no admin; omitted for `VENDOR_CONTACT` |
-
-### DELETE
-
-No body. Skip gracefully if error contains "owner" or "contact" (Oracle constraint).
-
-Used by: LoadBatch, LoadMissingContacts, PatchContracts/patch-contacts, DeleteConversionContacts, ReassignBuyer, UpdateContractContacts, DeleteContracts
-
----
-
-## `/fscmRestApi/resources/11.13.18.05/contracts/{ContractId}/child/ContractHeaderFlexfieldVA`
-
-### GET
-
-| Parameter | Values |
-|---|---|
-| `onlyData` | `true` |
-
-**Key fields on each item:**
-- `phsaCMTeam` — CM team code (e.g. `"PROFESSIONAL_SERVICES"`)
-- `contractExecutionApproved` — always `"PHSA"` on creation
-- `phsaCategory1`, `phsaCategory2`, `phsaCategory3` — category codes (CCR contracts)
-
-### POST — set DFF values
-
-| Field | Type | Notes |
-|---|---|---|
-| `phsaCMTeam` | string | from `CMTeam` — `.toUpperCase().replace(/\s+/g, "_")`, preserve hyphens |
-| `contractExecutionApproved` | string | always `"PHSA"` |
-| `phsaCategory1` | string | category 1 code — used by PatchContracts/patch-dff |
-| `phsaCategory2` | string | category 2 code |
-| `phsaCategory3` | string | category 3 code |
-
-Used by: LoadBatch (POST on create), PatchContracts/patch-dff (POST to add/replace), ValidateContracts (GET)
-
----
-
-## `/fscmRestApi/resources/11.13.18.05/contracts/{ContractId}/child/ContractDocuments`
-
-### GET
-
-| Parameter | Values |
-|---|---|
-| `fields` | `AttachedDocumentId, FileName, Title, CategoryName` |
-| `onlyData` | `true` |
-| `limit` | `500` |
-
-**CategoryName values**: `OKC_DOCUMENTS_CONTRACT`, `OKC_DOCUMENTS_PCD`
-
-Used by: DeleteContracts, ValidateContractDocuments
-
----
-
-## `/fscmRestApi/resources/11.13.18.05/contracts/{ContractId}/child/SupportingDocuments`
-
-### GET — same shape as ContractDocuments
-
-**CategoryName values**: `OKC_DOCUMENTS_SUPPORTING_DOC`, `PHSA_ITEM_SPREADSHEETS`
-
-> Note: peer child collection to ContractDocuments — NOT nested under it. Must fetch both separately.
-
-Used by: DeleteContracts, ValidateContractDocuments
-
----
-
-## `/fscmRestApi/resources/11.13.18.05/contracts/{ContractId}/action/submitForApproval`
-
-### POST — submit contract for approval
-
-No body required.
-
-Used by: ApproveContracts
-
----
-
-## `/fscmRestApi/resources/11.13.18.05/contracts/{ContractId}/action/sign`
-
-### POST — sign contract
-
-No body required.
-
-Used by: ApproveContracts
-
----
-
-## `/fscmRestApi/resources/11.13.18.05/ContractProperties_c`
-
-Custom extensible flexfield — auto-created by Oracle when a contract is created.
-
-### GET
-
-| Parameter | Values |
-|---|---|
-| `fields` | `Id, RecordName, ObjectId_c, MajorVersion_c, ContractNumber_c, SourcingTrackerID_c, ParticipatingHA_c, Text02_c, Text09_c, Text11_c, Text12_c, Text13_c, Text18_c, Number06_c–Number14_c, PDText01_c, PDText02_c, PDText03_c, Date01_c, ApprovalStatus_c` |
-| `q` | `ObjectId_c=<contractId>` |
-| `onlyData` | `true` |
-| `totalResults` | `true` |
-| `limit` | `500` |
-
-**Field mapping (CSV column → API field):**
-
-| API Field | CSV Column | Type | Transform |
-|---|---|---|---|
-| `ObjectId_c` | (contract `Id`) | number | links to contract |
-| `MajorVersion_c` | (contract `MajorVersion`) | number | |
-| `ContractNumber_c` | `ContractNumber` | string | |
-| `SourcingTrackerID_c` | `SourcingTrackerNumber` | string | |
-| `ParticipatingHA_c` | `HealthOrganization` | JSON array | |
-| `Text02_c` | `OptionYearsAvailable` | string | `optionYearsTransform()` |
-| `Text09_c` | `RebateType` | string | `.toUpperCase().replace(/\s+/g,"_")` — validated only, not loaded |
-| `Text11_c` | `RebateOrValueAdd` | string | `.toUpperCase().replace(/\s+/g,"_")` |
-| `Text12_c` | `RebateFrequencyName` | string | `.toUpperCase().replace(/\s+/g,"_")` |
-| `Text13_c` | `RebateDescription` | string | |
-| `Text18_c` | `AgencyOrDepartment` | string | |
-| `Number06_c` | `BCEHS_Est_AnnualSpend` | number | |
-| `Number07_c` | `FHA_Est_AnnualSpend` | number | |
-| `Number08_c` | `FNHA_Est_AnnualSpend` | number | |
-| `Number09_c` | `IHA_Est_AnnualSpend` | number | |
-| `Number10_c` | `VIHA_Est_AnnualSpend` | number | |
-| `Number11_c` | `NHA_Est_AnnualSpend` | number | |
-| `Number12_c` | `PHC_Est_AnnualSpend` | number | |
-| `Number13_c` | `PHSA_Est_AnnualSpend` | number | |
-| `Number14_c` | `VCHA_Est_AnnualSpend` | number | |
-| `PDText01_c` | `ContractTypeName` | JSON array | |
-| `PDText02_c` | `InitialProcurementStrategy` | string | `.toUpperCase().replace(/\s+/g,"_")` |
-| `PDText03_c` | `ExpiryStrategy` | string | `.toUpperCase().replace(/\s+/g,"_")` |
-| `Date01_c` | `DateOfNextPriceIncrease` | string | `YYYY-MM-DD` |
-| `ApprovalStatus_c` | — | string | set to `"99"` by ApproveContracts |
-
-### PATCH — update fields
-
-Body contains only the fields to update (subset of above). Used by:
-- LoadContractProperties/patch — bulk field patching
-- PatchContracts/patch-props — diff-driven patching
-- ApproveContracts — sets `ApprovalStatus_c: "99"`
-
-### DELETE — remove record
-
-Used by: DeleteOrphanedContractProperties
-
----
-
-## `/fscmRestApi/resources/11.13.18.05/contractVContacts`
-
-Vendor contacts lookup by supplier party.
-
-### GET
-
-| Parameter | Values |
-|---|---|
-| `fields` | `ContactId, PartyId, PartyName, ContactName, EmailAddress` |
-| `q` | `PartyId=<SupplierPartyId>` |
-| `onlyData` | `true` |
-| `totalResults` | `true` |
-
-**Match logic**: email first (case-insensitive), then full name (`ContactName`).
-
-Used by: LoadBatch, LoadMissingVendorContacts, PatchContracts/patch-contacts, UpdateContractContacts
-
----
-
-## `/fscmRestApi/resources/11.13.18.05/suppliers`
-
-### GET
-
-| Parameter | Values |
-|---|---|
-| `fields` | `SupplierId, SupplierPartyId, Supplier, DFF` |
-| `expand` | `all` — required to populate `DFF` child |
-| `onlyData` | `true` |
-| `totalResults` | `true` |
-| `limit` | `500` |
-
-**Key fields:**
-- `SupplierPartyId` — use this (NOT `SupplierId`) as contract `PrimaryPartyId` / `PartyId`
-- `DFF` — array (child collection); access as `DFF[0].vendorMasterId` (camelCase)
-- `DFF[0].vendorMasterId` → matched against driver CSV `VendorMasterId` to resolve `SupplierPartyId`
-
-Used by: LoadBatch, ValidateContracts, FetchSupplierContacts, PatchContracts/gen-distributor-csv
-
----
-
-## `/fscmRestApi/resources/11.13.18.05/suppliers/{SupplierId}/child/contacts`
-
-### GET
-
-| Parameter | Values |
-|---|---|
-| `fields` | `SupplierContactId, Status, InactiveDate` |
-| `onlyData` | `true` |
-
-### PATCH — inactivate a contact
-
-| Field | Type | Notes |
-|---|---|---|
-| `InactiveDate` | string | `YYYY-MM-DD` |
-
-Used by: BulkDeleteEntities/run-inactivate-contacts, LoadMissingVendorContacts
-
----
-
-## SOAP — BI Publisher Contact Crosswalk
-
-**Endpoint**: `/xmlpserver/services/ExternalReportWSSService`  
-**Method**: POST  
-**Content-Type**: `application/soap+xml; charset=utf-8`  
-**Report path**: `/Custom/PHSA/Suppliers/Interfaces/PARTY_CONTACT_ID_CROSSWALK.xdo`
-
-Response: base64-decode `<ns2:reportBytes>` → CSV (has BOM, use `bom: true` in csv-parse).
-
-**CSV columns:**
-
-| Column | Notes |
-|---|---|
-| `SUPPLIER_PARTY_ID` | Use as `ContactId` in ContractPartyContact POST for **customer** contacts (despite the name) |
-| `SUPPLIER_PARTY_CONTACT_ID` | `-1` for customer contacts |
-| `CONTRACT_CONTACT_ID` | `-1` for customer contacts |
-| `PARTY_NUMBER` | |
-| `EMAIL_ADDRESS` | used to build email → ContactId lookup map |
-
-Used by: LoadBatch, LoadMissingContacts, PatchContracts/patch-contacts, ReassignBuyer, ValidateContracts/check-crosswalk
-
----
-
-## Common Error Codes
-
-| Code | Meaning |
-|---|---|
-| `OKC-196203` | Contact already exists (duplicate) |
-| `OKC-195743` | Invalid `ContactRoleCode` |
-| `OKC-195790` | Invalid party ID (use `SupplierPartyId`, not `SupplierId`) |
-| `OKC-195788` | Duplicate contract number/type/intent combination |
-| HTTP 400 | Client error — do NOT retry |
+| `1-DeleteContracts` | `GET /contracts?q=ContractNumber=…`; `GET /contracts?limit=1` (sanity); `DELETE /contracts/{id}` |
+| `2-TransformHeadings` | *(none — offline CSV reshape)* |
+| `3-TransformValues` | *(none active — `GET /valueSets/.../child/values`, `GET /standardLookups/.../child/lookupCodes` present but commented out)* |
+| `4-ValidateValues` | `GET /valueSets/{code}/child/values`; `GET /standardLookups/{code}/child/lookupCodes` |
+| `5-FillContractTypeId` | `GET /contracts/300000006409761/lov/ContractTypeAllVA` |
+| `6-FillPrimaryPartyId` | `GET /suppliers?...&expand=all` (paginated) |
+| `7-InsertContract` | `GET /suppliers?fields=SupplierId,SupplierPartyId` (paginated); `POST /contracts` |
+| `8-InsertContractProperties` | `GET /contracts?fields=Id,ContractId,ContractNumber,MajorVersion` (paginated); `GET /ContractProperties_c?fields=Id,ObjectId_c` (paginated); `POST /ContractProperties_c`; `PATCH /ContractProperties_c/{id}` |
+| `9-InsertContacts` | `POST /xmlpserver/services/ExternalReportWSSService` (SOAP crosswalk); `GET /contracts?fields=ContractId,ContractNumber` (paginated); `GET /contracts/{id}/child/ContractParty?expand=all`; `GET /contractVContacts?q=PartyId=…`; `GET /suppliers?q=SupplierPartyId=…`; `POST /suppliers/{id}/child/contacts`; `POST {partyHref}/child/ContractPartyContact`; `DELETE {partyContactHref}` |
+| `9-InsertContacts/retry-and-report.js` | same family as `9-InsertContacts` (minus the CONVERSION delete) |
+| `10-EnrichDocumentFilesList` (PowerShell) | `GET /contracts?q=ContractNumber=…` |
+| `11-ImportContractDocuments` (PowerShell) | `GET /contracts?limit=1` (sanity); `GET /contracts/{id}/child/ContractDocuments` & `…/SupportingDocuments` (paginated, limit=200 — existence check); `POST /contracts/{id}/child/ContractDocuments` & `…/SupportingDocuments` (upload) |
+| `12-SubmitContractsForApproval` | `GET /contracts?q=ContractNumber=…` (fallback id resolve); `POST /contracts/{id}/action/submitForApproval` |
+| `13-ActivateContracts` | `POST /contracts/{id}/action/sign` |
+| `DeleteContractProperties` | `GET /ContractProperties_c?q=ContractNumber_c=…` (paginated); `DELETE /ContractProperties_c/{id}` |
+| *(diagnostics)* | `GET /contracts/{id}?expand=all`; `POST /contracts/{id}/action/validateContract` |
