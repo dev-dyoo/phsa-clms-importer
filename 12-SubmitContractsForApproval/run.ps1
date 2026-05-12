@@ -25,7 +25,8 @@ $ErrorActionPreference = 'Stop'
 # ---------------------------------------------------------------------------
 
 $ScriptDir  = Split-Path -Parent $MyInvocation.MyCommand.Path
-$CommonDir  = Join-Path (Split-Path -Parent $ScriptDir) '_common'
+# shared library lives in 11-ImportContractDocuments/_common
+$CommonDir  = Join-Path (Join-Path (Split-Path -Parent $ScriptDir) '11-ImportContractDocuments') '_common'
 
 Import-Module (Join-Path $CommonDir 'OracleFusionCommon.psm1') -Force
 
