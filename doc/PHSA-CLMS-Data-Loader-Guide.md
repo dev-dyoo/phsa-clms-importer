@@ -1,15 +1,18 @@
-# phsa-clms-importer — Maintenance & Operations Guide
+# PHSA CLMS Data Loader — Guide
 
-Hand-off documentation for whoever runs and maintains this pipeline next.
-(Markdown for now; intended to be converted to a Word document.)
+Hand-off documentation for whoever runs and maintains this loader next.
+(Companion to the *CLMS Data Conversion Report — Final*, which reports the
+results of the post-go-live batch this loader was built for. Formerly
+`MAINTENANCE.md`.)
 
 This repo loads PHSA contract data into **Oracle Fusion Cloud — Enterprise
 Contracts (CLMS)** via the Fusion REST API (and one SOAP/BI-Publisher call).
-It is a batch-conversion toolkit: each step is a standalone script that reads a
-CSV (and/or Oracle), does one job, and writes results + logs. **The leading
-numbers on the folders are just execution order — they are not version numbers
-or semantic identifiers.** You generally run them low-to-high; some are
-optional or rerun-only.
+It is a batch-conversion toolkit — a standalone, plainly-readable rewrite of the
+import logic that PHSA previously ran through an n8n workflow: each step is a
+standalone script that reads a CSV (and/or Oracle), does one job, and writes
+results + logs. **The leading numbers on the folders are just execution order —
+they are not version numbers or semantic identifiers.** You generally run them
+low-to-high; some are optional or rerun-only.
 
 ---
 
