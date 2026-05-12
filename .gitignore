@@ -1,11 +1,13 @@
 node_modules/
 
-# Credentials
+# Credentials — the real settings files hold the PROD Oracle password.
+# Templates (settings.example.toml, **/.settings.example) ARE committed.
 settings.toml
 **/.settings
 
 # Per-script runtime artifacts
 **/log/
+**/logs/
 **/output/
 
 # Backups

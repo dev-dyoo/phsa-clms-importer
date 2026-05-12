@@ -1,0 +1,8 @@
+{
+  "BaseUrl":               "iaequp.fa.ocs.oraclecloud.com",
+  "Username":              "CONVERSION",
+  "Password":              "REPLACE_ME",
+  "ApiPath":               "/fscmRestApi/resources/11.13.18.05/contracts",
+  "MaxRetries":            7,
+  "RetryBaselineSeconds":  1
+}
