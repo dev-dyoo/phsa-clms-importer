@@ -2,6 +2,7 @@ node_modules/
 
 # Credentials
 settings.toml
+**/.settings
 
 # Per-script runtime artifacts
 **/log/

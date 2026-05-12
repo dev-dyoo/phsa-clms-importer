@@ -15,6 +15,8 @@
     "8-insert-contract-properties": "node 8-InsertContractProperties/run.js",
     "9-insert-contacts": "node 9-InsertContacts/run.js",
     "9-retry-and-report": "node 9-InsertContacts/retry-and-report.js",
+    "12-submit-for-approval": "node 12-SubmitContractsForApproval/run.js",
+    "13-activate-contracts": "node 13-ActivateContracts/run.js",
     "delete-contract-properties": "node DeleteContractProperties/run.js"
   },
   "dependencies": {
