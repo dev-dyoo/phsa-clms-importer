@@ -1,0 +1,44 @@
+FINAL_FINAL_BATCH.csv reshape log
+=================================
+
+Header changes:
+- Renamed TYPE -> CONTRACT_TYPE, moved to position 4
+- Dropped column RebateType (not present in LAST_BATCH_LOAD.csv)
+- Added empty columns: VendorMasterDescrip_REFERENCE, FHA_Est_AnnualSpend, IHA_Est_AnnualSpend, NHA_Est_AnnualSpend, PHC_Est_AnnualSpend, PHSA_Est_AnnualSpend, VCHA_Est_AnnualSpend, VIHA_Est_AnnualSpend, BCEHS_Est_AnnualSpend, FNHA_Est_AnnualSpend, TotalValue
+- Stripped trailing empty columns
+
+Rows processed: 79
+Non-empty RebateType values dropped: 2
+
+ContractID,RebateType
+12446,Education, Value-Add
+16118,ONE_TIME_PRICE_ADJUSTMENT
+
+Step 7 (InsertContract) run 2026-05-14:
+- Inserted: 78 / 79
+- Failed:   1
+  - ContractNumber: C03923-04
+  - PrimaryPartyId: 300000006497319
+  - ContractTypeId: 300000005684063
+  - Error: HTTP 400: You must enter a different combination. There's already a combination of this contract number, contract type, and intent. (OKC-195788)
+  - Likely cause: already loaded in prior batch (duplicate combo)
+  - Action: skipped; steps 8 and 9 will skip this row (no OracleContractId)
+
+Step 8 (InsertContractProperties):
+- 1st run: 77 PATCHED, 1 transient lock failure (RX-11662-21-2022 — duplicate name across PCODR & Confidential MOU types)
+- 2nd run (retry): 78 PATCHED, 0 failed
+
+Step 9 (InsertContacts) + retry-and-report:
+- Resolved on retry: RX-11662-21-2022 vendor contact (ALREADY_EXISTS)
+- Outstanding manual handling: 1 row
+  - ContractNumber: C03762
+  - ContractId: 300000007957903
+  - Issue: NO_PHSA_CONTACTS — lead manager + buyer emails not in Oracle crosswalk
+  - Action: add to directory or assign contacts manually
+- Report: 9-InsertContacts/output/MANUAL-HANDLING-REPORT.csv
+
+Final batch summary:
+- 79 input rows
+- 78 contracts created in Oracle
+- 1 duplicate skipped: C03923-04 (OKC-195788)
+- 1 needs manual contact assignment: C03762 (NO_PHSA_CONTACTS)
